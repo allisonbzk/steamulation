@@ -408,7 +408,8 @@ def fetch_game_icon(game_name, appid, steamid, platform='switch', progress_callb
             print(msg)
             if progress_callback:
                 progress_callback(msg)
-            return True
+            # Return the icon path if it exists
+            return icon_path if os.path.exists(icon_path) else None
         
         # Check for API key in environment or config
         api_key = os.environ.get('STEAMGRIDDB_API_KEY')
@@ -423,7 +424,7 @@ def fetch_game_icon(game_name, appid, steamid, platform='switch', progress_callb
             print("  Set environment variable: STEAMGRIDDB_API_KEY=your_key")
             if progress_callback:
                 progress_callback(msg)
-            return False
+            return None
         
         # Use SteamGridDB API with authentication
         search_term = quote(game_name)
@@ -444,7 +445,7 @@ def fetch_game_icon(game_name, appid, steamid, platform='switch', progress_callb
             print(msg)
             if progress_callback:
                 progress_callback(msg)
-            return False
+            return None
         
         data = response.json()
         if not (data.get('success') and data.get('data') and len(data['data']) > 0):
@@ -452,7 +453,7 @@ def fetch_game_icon(game_name, appid, steamid, platform='switch', progress_callb
             print(msg)
             if progress_callback:
                 progress_callback(msg)
-            return False
+            return None
         
         # Get the first match's game ID
         game_id = data['data'][0].get('id')
@@ -461,7 +462,7 @@ def fetch_game_icon(game_name, appid, steamid, platform='switch', progress_callb
             print(msg)
             if progress_callback:
                 progress_callback(msg)
-            return False
+            return None
         
         success_count = 0
         
@@ -490,20 +491,37 @@ def fetch_game_icon(game_name, appid, steamid, platform='switch', progress_callb
             
             try:
                 # Different API endpoints for different art types
-                # Add dimension filter for grids
-                if dimension_filter:
-                    art_url = f"https://www.steamgriddb.com/api/v2/{endpoint}/game/{game_id}?dimensions={dimension_filter}"
-                else:
-                    art_url = f"https://www.steamgriddb.com/api/v2/{endpoint}/game/{game_id}"
+                art_url = f"https://www.steamgriddb.com/api/v2/{endpoint}/game/{game_id}"
                 
-                print(f"  Fetching {art_name} from {art_url}...")
+                print(f"  Fetching {art_name}...")
                 art_response = requests.get(art_url, headers=headers, timeout=10)
                 
                 if art_response.ok:
                     art_data = art_response.json()
+                    
                     if art_data.get('success') and art_data.get('data') and len(art_data['data']) > 0:
+                        # For grids, filter by aspect ratio (portrait vs landscape)
+                        # Portrait: height > width (typically 600x900)
+                        # Landscape: width > height (typically 920x430)
+                        available_images = art_data['data']
+                        
+                        if dimension_filter:
+                            filtered = []
+                            for img in available_images:
+                                w, h = img.get('width', 0), img.get('height', 0)
+                                if dimension_filter == 'portrait' and h > w:
+                                    filtered.append(img)
+                                elif dimension_filter == 'landscape' and w > h:
+                                    filtered.append(img)
+                            
+                            if filtered:
+                                available_images = filtered
+                            else:
+                                print(f"  ✗ No {dimension_filter} {art_name} available")
+                                continue
+                        
                         # Get the first image URL
-                        img_url = art_data['data'][0].get('url')
+                        img_url = available_images[0].get('url')
                         if img_url:
                             msg = f"Downloading {art_name} for '{game_name}'..."
                             print(msg)
@@ -536,13 +554,14 @@ def fetch_game_icon(game_name, appid, steamid, platform='switch', progress_callb
             print(msg)
             if progress_callback:
                 progress_callback(msg)
-            return True
+            # Return the icon path if it exists
+            return icon_path if os.path.exists(icon_path) else None
         else:
-            msg = f"✗ Could not download any artwork for '{game_name}'"
+            msg = f"✗ No artwork downloaded for '{game_name}'"
             print(msg)
             if progress_callback:
                 progress_callback(msg)
-            return False
+            return None
             
     except Exception as e:
         msg = f"✗ Failed to fetch artwork for '{game_name}': {e}"
@@ -551,7 +570,7 @@ def fetch_game_icon(game_name, appid, steamid, platform='switch', progress_callb
         traceback.print_exc()
         if progress_callback:
             progress_callback(msg)
-        return False
+        return None
 
 def scrape_roms(roms_folder):
     # Recursively find .nsp files, avoid updates, extract display name
@@ -779,7 +798,8 @@ def add_steam_shortcuts(emulator, platform, games, steamid=None, launch_options_
     # First pass: collect appids and mark updates
     for game in games:
         appid = calc_shortcut_appid(emulator.replace('/', '\\'), game['display_name'])
-        new_appids.append(int(appid))
+        # Convert to unsigned 32-bit integer for collection management
+        new_appids.append(int(appid) & 0xFFFFFFFF)
         updated += 1
     # Remove duplicates from new_appids
     new_appids = sorted(set(new_appids))
@@ -791,9 +811,10 @@ def add_steam_shortcuts(emulator, platform, games, steamid=None, launch_options_
             progress_callback(f"Processing {idx}/{total_games}: {game['display_name']}")
         
         # Fetch icon if enabled (save directly to Steam's grid folder)
+        icon_path = None
         if fetch_icons:
             appid = calc_shortcut_appid(emulator.replace('/', '\\'), game['display_name'])
-            fetch_game_icon(game['display_name'], appid, steamid, platform.lower(), progress_callback)
+            icon_path = fetch_game_icon(game['display_name'], appid, steamid, platform.lower(), progress_callback)
         
         found = False
         for s in shortcut_list:
@@ -808,6 +829,9 @@ def add_steam_shortcuts(emulator, platform, games, steamid=None, launch_options_
                 s['sortas'] = ''
                 s['tags'] = {}
                 s['appid'] = calc_shortcut_appid(emulator.replace('/', '\\'), game['display_name'])
+                # Set icon path if we have one
+                if icon_path:
+                    s['icon'] = icon_path
                 # Remove lowercase keys if present
                 if 'appname' in s:
                     del s['appname']
@@ -820,7 +844,7 @@ def add_steam_shortcuts(emulator, platform, games, steamid=None, launch_options_
                 'AppName': game['display_name'],
                 'Exe': f'"{emulator}"'.replace('/', '\\'),
                 'StartDir': f'"{os.path.dirname(emulator)}"'.replace('/', '\\'),
-                'icon': '',
+                'icon': icon_path if icon_path else '',
                 'ShortcutPath': '',
                 'LaunchOptions': launch_options_template.replace('#rom', f'"{game["path"]}"'),
                 'IsHidden': 0,
@@ -841,7 +865,7 @@ def add_steam_shortcuts(emulator, platform, games, steamid=None, launch_options_
     if progress_callback:
         progress_callback(f"Writing {len(shortcut_list)} shortcuts to Steam...")
     
-    print(f"Writing {len(shortcut_list)} shortcuts to {vdf_path}")
+    print(f"Writing shortcuts to {vdf_path}")
     shortcuts_dict = {'shortcuts': {str(i): s for i, s in enumerate(shortcut_list)}}
     with open(vdf_path, 'wb') as f:
         vdf.binary_dump(shortcuts_dict, f)

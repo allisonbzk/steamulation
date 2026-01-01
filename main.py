@@ -53,6 +53,7 @@ def load_mapping():
         # Default mapping if file doesn't exist
         return {
             "default": {
+                'eden': 'Switch',
                 'yuzu': 'Switch',
                 'ryujinx': 'Switch',
                 'eden': 'Switch',
@@ -114,46 +115,9 @@ def guess_platform_from_exe(exe):
     for key, value in mapping.get('default', {}).items():
         if key in exe_key:
             return value
-    # Try to use an online API to guess the system
-    try:
-        guess = guess_platform_online(exe)
-        if guess:
-            # Save to custom mapping for future use
-            mapping['custom'][exe_key] = guess
-            save_mapping(mapping)
-            return guess
-    except Exception:
-        pass
     # Fallback: use filename without extension, capitalized
     name = exe_key.capitalize()
     return name
-
-# --- Online Guess Helper (placeholder) ---
-def guess_platform_online(exe):
-    """
-    Try to guess the system/platform for an emulator executable using a web/AI API.
-    This is a placeholder: insert your API call here (e.g., OpenAI, Bing, etc).
-    Returns a string guess, or None if not found.
-    """
-    # Example: Use OpenAI API (pseudo-code, requires requests and an API key)
-    # import requests
-    # api_key = os.environ.get('OPENAI_API_KEY')
-    # if not api_key:
-    #     return None
-    # prompt = f"What gaming system does the emulator '{exe}' run games for? Respond with only the system/platform name."
-    # response = requests.post(
-    #     'https://api.openai.com/v1/chat/completions',
-    #     headers={'Authorization': f'Bearer {api_key}'},
-    #     json={
-    #         'model': 'gpt-3.5-turbo',
-    #         'messages': [{'role': 'user', 'content': prompt}],
-    #         'max_tokens': 10
-    #     }
-    # )
-    # if response.ok:
-    #     return response.json()['choices'][0]['message']['content'].strip()
-    # return None
-    return None  # No API key/configured, so always fallback
 
 
 class RomsPage(QWizardPage):
@@ -597,17 +561,31 @@ def scrape_roms(roms_folder):
 import vdf
 
 def get_steam_userdata_path():
-    # Default Steam path for Windows
-    user = getpass.getuser()
-    possible_paths = [
-        os.path.expandvars(rf'C:\Program Files (x86)\Steam\userdata'),
-        os.path.expandvars(rf'C:\Program Files\Steam\userdata'),
-        os.path.expandvars(rf'D:\Steam\userdata'),
-    ]
+    """Get Steam userdata path for Windows or Linux (Steam Deck)."""
+    import platform
+    
+    if platform.system() == 'Windows':
+        # Windows paths
+        possible_paths = [
+            os.path.expandvars(r'C:\Program Files (x86)\Steam\userdata'),
+            os.path.expandvars(r'C:\Program Files\Steam\userdata'),
+            os.path.expandvars(r'D:\Steam\userdata'),
+            os.path.expandvars(r'E:\Steam\userdata'),
+        ]
+    else:
+        # Linux/Steam Deck paths
+        home = os.path.expanduser('~')
+        possible_paths = [
+            os.path.join(home, '.local', 'share', 'Steam', 'userdata'),
+            os.path.join(home, '.steam', 'steam', 'userdata'),
+            os.path.join(home, '.var', 'app', 'com.valvesoftware.Steam', '.local', 'share', 'Steam', 'userdata'),  # Flatpak
+        ]
+    
     for path in possible_paths:
         if os.path.exists(path):
             return path
-    raise FileNotFoundError('Could not find Steam userdata folder.')
+    
+    raise FileNotFoundError(f'Could not find Steam userdata folder. Searched: {possible_paths}')
 
 def get_steam_users():
     """

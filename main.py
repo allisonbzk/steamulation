@@ -219,14 +219,30 @@ class SummaryPage(QWizardPage):
         self.rom_list = QListWidget()
         self.layout.addWidget(QLabel('Games detected:'))
         self.layout.addWidget(self.rom_list)
-        self.save_btn = QPushButton('Add to Steam Library')
-        self.save_btn.clicked.connect(self.save_shortcuts)
-        self.layout.addWidget(self.save_btn)
+        # Icon fetching option
+        self.fetch_icons_check = QCheckBox('Fetch game icons from SteamGridDB')
+        config = load_config()
+        self.fetch_icons_check.setChecked(config.get('fetch_icons', True))
+        self.layout.addWidget(self.fetch_icons_check)
         self.status_label = QLabel()
         self.layout.addWidget(self.status_label)
         self.setLayout(self.layout)
-
+        # Mark this as the final page
+        self.setFinalPage(True)
+    
     def initializePage(self):
+        # Hide Cancel button on this page
+        self.wizard.button(QWizard.CancelButton).setVisible(False)
+        # Change Finish button text to "Close"
+        self.wizard.button(QWizard.FinishButton).setText('Close')
+        # Create custom "Add to Steam Library" button in place of Next/Finish
+        self.wizard.button(QWizard.CustomButton1).setText('Add to Steam Library')
+        self.wizard.button(QWizard.CustomButton1).setVisible(True)
+        self.wizard.button(QWizard.CustomButton1).clicked.connect(self.save_shortcuts)
+        # Set button layout: [Back] [Finish->Close] ... [CustomButton1->Add to Steam]
+        self.wizard.setOption(QWizard.HaveCustomButton1, True)
+
+        # Scan for ROMs
         roms_folder = self.wizard.page(3).roms_path.text()  # RomsPage is now at index 3
         games = scrape_roms(roms_folder)
         self.rom_list.clear()
@@ -241,6 +257,7 @@ class SummaryPage(QWizardPage):
         emulator = self.wizard.page(1).exe_path.text()
         platform = self.wizard.page(2).platform_name.text()
         launch_options = self.wizard.page(4).launch_options.text()  # LaunchOptionsPage is at index 4
+        fetch_icons = self.fetch_icons_check.isChecked()
         games = self.wizard.found_games
         steamids = self.wizard.page(0).selected_steamids()
         
@@ -263,19 +280,77 @@ class SummaryPage(QWizardPage):
         config['last_emulator'] = emulator
         config['last_roms'] = self.wizard.page(3).roms_path.text()
         config['last_launch_options'] = launch_options
+        config['fetch_icons'] = fetch_icons
         if steamids:
             config['last_steamid'] = steamids[0]
         save_config(config)
         try:
             count = 0
             for steamid in steamids:
-                count += add_steam_shortcuts(emulator, platform.strip(), games, steamid, launch_options)
+                count += add_steam_shortcuts(emulator, platform.strip(), games, steamid, launch_options, fetch_icons)
             self.status_label.setText(f"Added/updated {count} shortcuts to Steam!")
         except Exception as e:
             import traceback
             error_details = traceback.format_exc()
             print(error_details)  # Print full traceback to console
             self.status_label.setText(f"Error: {str(e)[:100]}...")  # Show truncated error
+
+def get_icons_cache_dir():
+    """Get or create the icons cache directory."""
+    cache_dir = os.path.join(os.path.dirname(__file__), 'icon_cache')
+    if not os.path.exists(cache_dir):
+        os.makedirs(cache_dir)
+    return cache_dir
+
+def sanitize_filename(name):
+    """Sanitize game name for use as filename."""
+    # Remove invalid filename characters
+    return re.sub(r'[<>:"/\\|?*]', '_', name)
+
+def fetch_game_icon(game_name, platform='switch'):
+    """Fetch game icon from SteamGridDB and return local path."""
+    try:
+        import requests
+        cache_dir = get_icons_cache_dir()
+        safe_name = sanitize_filename(game_name)
+        icon_path = os.path.join(cache_dir, f"{safe_name}.png")
+        
+        # Check if already cached
+        if os.path.exists(icon_path):
+            return icon_path
+        
+        # Search SteamGridDB (no API key needed for basic search)
+        # Using their public search endpoint
+        search_url = f"https://www.steamgriddb.com/api/public/search/autocomplete/{game_name}"
+        headers = {'User-Agent': 'Steam-Emulator-Station/1.0'}
+        
+        response = requests.get(search_url, headers=headers, timeout=5)
+        if response.ok:
+            data = response.json()
+            if data and len(data) > 0:
+                # Get the first match
+                game_id = data[0].get('id')
+                if game_id:
+                    # Fetch grid image
+                    grid_url = f"https://www.steamgriddb.com/api/public/grid/{game_id}"
+                    grid_response = requests.get(grid_url, headers=headers, timeout=10)
+                    if grid_response.ok:
+                        grid_data = grid_response.json()
+                        if grid_data and len(grid_data) > 0:
+                            # Get first grid image URL
+                            img_url = grid_data[0].get('url')
+                            if img_url:
+                                # Download image
+                                img_response = requests.get(img_url, headers=headers, timeout=10)
+                                if img_response.ok:
+                                    with open(icon_path, 'wb') as f:
+                                        f.write(img_response.content)
+                                    print(f"Downloaded icon for '{game_name}'")
+                                    return icon_path
+        return None
+    except Exception as e:
+        print(f"Failed to fetch icon for '{game_name}': {e}")
+        return None
 
 def scrape_roms(roms_folder):
     # Recursively find .nsp files, avoid updates, extract display name
@@ -471,7 +546,7 @@ def add_shortcuts_to_steam_collection(appids, collection_name, steamid=None):
         json.dump(data, f, separators=(',', ':'))
     print(f"Updated cloud-storage-namespace-1.json with collection '{collection_name}'")
 
-def add_steam_shortcuts(emulator, platform, games, steamid=None, launch_options_template='#rom'):
+def add_steam_shortcuts(emulator, platform, games, steamid=None, launch_options_template='#rom', fetch_icons=True):
     vdf_path = find_steam_shortcuts_vdf(steamid)
     # Read existing shortcuts robustly
     shortcut_dict = {}
@@ -496,6 +571,13 @@ def add_steam_shortcuts(emulator, platform, games, steamid=None, launch_options_
     new_appids = sorted(set(new_appids))
     # Second pass: write/update shortcuts
     for game in games:
+        # Fetch icon if enabled
+        icon_path = ''
+        if fetch_icons:
+            icon = fetch_game_icon(game['display_name'], platform.lower())
+            if icon:
+                icon_path = icon.replace('/', '\\')
+        
         found = False
         for s in shortcut_list:
             if s.get('AppName') == game['display_name'] or s.get('appname') == game['display_name']:
@@ -503,6 +585,8 @@ def add_steam_shortcuts(emulator, platform, games, steamid=None, launch_options_
                 s['Exe'] = f'"{emulator}"'.replace('/', '\\')
                 s['StartDir'] = f'"{os.path.dirname(emulator)}"'.replace('/', '\\')
                 s['LaunchOptions'] = launch_options_template.replace('#rom', f'"{game["path"]}"')
+                if icon_path:
+                    s['icon'] = icon_path
                 s['LastPlayTime'] = int(time.time())
                 s['DevkitOverrideAppID'] = 0
                 s['FlatpakAppID'] = ''
@@ -521,7 +605,7 @@ def add_steam_shortcuts(emulator, platform, games, steamid=None, launch_options_
                 'AppName': game['display_name'],
                 'Exe': f'"{emulator}"'.replace('/', '\\'),
                 'StartDir': f'"{os.path.dirname(emulator)}"'.replace('/', '\\'),
-                'icon': '',
+                'icon': icon_path,
                 'ShortcutPath': '',
                 'LaunchOptions': launch_options_template.replace('#rom', f'"{game["path"]}"'),
                 'IsHidden': 0,
@@ -572,6 +656,9 @@ class SteamEmuWizard(QWizard):
     def __init__(self):
         super().__init__()
         self.setWindowTitle('Steam Emulator Station Wizard')
+        # Enable custom button but hide it by default
+        self.setOption(QWizard.HaveCustomButton1, True)
+        self.button(QWizard.CustomButton1).setVisible(False)
         self.addPage(SteamUserPage())           # Index 0
         self.addPage(EmulatorPage())            # Index 1
         self.addPage(PlatformPage())            # Index 2

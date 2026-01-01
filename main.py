@@ -207,6 +207,57 @@ class LaunchOptionsPage(QWizardPage):
             self.launch_options.setText('#rom')
 
 
+class IconOptionsPage(QWizardPage):
+    def __init__(self):
+        super().__init__()
+        self.setTitle('Icon Options')
+        layout = QVBoxLayout()
+        
+        # Fetch icons checkbox
+        self.fetch_icons_check = QCheckBox('Fetch game icons from SteamGridDB')
+        layout.addWidget(self.fetch_icons_check)
+        
+        # API key field
+        layout.addWidget(QLabel('\nSteamGridDB API Key (optional):'))
+        self.api_key_input = QLineEdit()
+        self.api_key_input.setEchoMode(QLineEdit.Password)
+        self.api_key_input.setPlaceholderText('Enter your API key here')
+        layout.addWidget(self.api_key_input)
+        
+        # Show/Hide password button
+        show_key_layout = QHBoxLayout()
+        self.show_key_check = QCheckBox('Show API key')
+        self.show_key_check.stateChanged.connect(self.toggle_key_visibility)
+        show_key_layout.addWidget(self.show_key_check)
+        show_key_layout.addStretch()
+        layout.addLayout(show_key_layout)
+        
+        # Instructions
+        instructions = QLabel(
+            'To fetch game icons, you need a free SteamGridDB API key.\n'
+            'Get your API key at: https://www.steamgriddb.com/profile/preferences/api\n\n'
+            'Note: Icon fetching is optional. Games will be added without icons if disabled.'
+        )
+        instructions.setWordWrap(True)
+        instructions.setStyleSheet('color: #666; font-size: 9pt;')
+        layout.addWidget(instructions)
+        
+        layout.addStretch()
+        self.setLayout(layout)
+        
+        # Load saved settings
+        config = load_config()
+        self.fetch_icons_check.setChecked(config.get('fetch_icons', True))
+        if config.get('steamgriddb_api_key'):
+            self.api_key_input.setText(config['steamgriddb_api_key'])
+    
+    def toggle_key_visibility(self, state):
+        if state:
+            self.api_key_input.setEchoMode(QLineEdit.Normal)
+        else:
+            self.api_key_input.setEchoMode(QLineEdit.Password)
+
+
 import re
 from PyQt5.QtWidgets import QListWidget, QListWidgetItem
 
@@ -219,11 +270,6 @@ class SummaryPage(QWizardPage):
         self.rom_list = QListWidget()
         self.layout.addWidget(QLabel('Games detected:'))
         self.layout.addWidget(self.rom_list)
-        # Icon fetching option
-        self.fetch_icons_check = QCheckBox('Fetch game icons from SteamGridDB')
-        config = load_config()
-        self.fetch_icons_check.setChecked(config.get('fetch_icons', True))
-        self.layout.addWidget(self.fetch_icons_check)
         self.status_label = QLabel()
         self.layout.addWidget(self.status_label)
         self.setLayout(self.layout)
@@ -243,7 +289,7 @@ class SummaryPage(QWizardPage):
         self.wizard.setOption(QWizard.HaveCustomButton1, True)
 
         # Scan for ROMs
-        roms_folder = self.wizard.page(3).roms_path.text()  # RomsPage is now at index 3
+        roms_folder = self.wizard.page(3).roms_path.text()  # RomsPage is at index 3
         games = scrape_roms(roms_folder)
         self.rom_list.clear()
         for game in games:
@@ -257,7 +303,8 @@ class SummaryPage(QWizardPage):
         emulator = self.wizard.page(1).exe_path.text()
         platform = self.wizard.page(2).platform_name.text()
         launch_options = self.wizard.page(4).launch_options.text()  # LaunchOptionsPage is at index 4
-        fetch_icons = self.fetch_icons_check.isChecked()
+        fetch_icons = self.wizard.page(5).fetch_icons_check.isChecked()  # IconOptionsPage is at index 5
+        api_key = self.wizard.page(5).api_key_input.text().strip()  # Get API key from IconOptionsPage
         games = self.wizard.found_games
         steamids = self.wizard.page(0).selected_steamids()
         
@@ -281,19 +328,43 @@ class SummaryPage(QWizardPage):
         config['last_roms'] = self.wizard.page(3).roms_path.text()
         config['last_launch_options'] = launch_options
         config['fetch_icons'] = fetch_icons
+        if api_key:
+            config['steamgriddb_api_key'] = api_key
         if steamids:
             config['last_steamid'] = steamids[0]
         save_config(config)
+        
+        # Disable button during processing
+        self.wizard.button(QWizard.CustomButton1).setEnabled(False)
+        self.status_label.setText("Starting...")
+        QApplication.processEvents()  # Update UI
+        
         try:
             count = 0
             for steamid in steamids:
-                count += add_steam_shortcuts(emulator, platform.strip(), games, steamid, launch_options, fetch_icons)
-            self.status_label.setText(f"Added/updated {count} shortcuts to Steam!")
+                count += add_steam_shortcuts(
+                    emulator, 
+                    platform.strip(), 
+                    games, 
+                    steamid, 
+                    launch_options, 
+                    fetch_icons,
+                    progress_callback=self.update_progress
+                )
+            self.status_label.setText(f"✓ Successfully added/updated {count} shortcuts to Steam!")
         except Exception as e:
             import traceback
             error_details = traceback.format_exc()
             print(error_details)  # Print full traceback to console
             self.status_label.setText(f"Error: {str(e)[:100]}...")  # Show truncated error
+        finally:
+            # Re-enable button
+            self.wizard.button(QWizard.CustomButton1).setEnabled(True)
+    
+    def update_progress(self, message):
+        """Update the status label with progress messages."""
+        self.status_label.setText(message)
+        QApplication.processEvents()  # Force UI update
 
 def get_icons_cache_dir():
     """Get or create the icons cache directory."""
@@ -307,50 +378,180 @@ def sanitize_filename(name):
     # Remove invalid filename characters
     return re.sub(r'[<>:"/\\|?*]', '_', name)
 
-def fetch_game_icon(game_name, platform='switch'):
-    """Fetch game icon from SteamGridDB and return local path."""
+def fetch_game_icon(game_name, appid, steamid, platform='switch', progress_callback=None):
+    """Fetch game icon from SteamGridDB and save to Steam's grid folder."""
     try:
         import requests
-        cache_dir = get_icons_cache_dir()
-        safe_name = sanitize_filename(game_name)
-        icon_path = os.path.join(cache_dir, f"{safe_name}.png")
+        from urllib.parse import quote
         
-        # Check if already cached
-        if os.path.exists(icon_path):
-            return icon_path
+        # Get Steam's grid folder for this user
+        userdata_path = get_steam_userdata_path()
+        grid_dir = os.path.join(userdata_path, steamid, 'config', 'grid')
+        if not os.path.exists(grid_dir):
+            os.makedirs(grid_dir)
         
-        # Search SteamGridDB (no API key needed for basic search)
-        # Using their public search endpoint
-        search_url = f"https://www.steamgriddb.com/api/public/search/autocomplete/{game_name}"
-        headers = {'User-Agent': 'Steam-Emulator-Station/1.0'}
+        # Steam uses unsigned 32-bit AppID for grid filenames
+        # Convert signed to unsigned for display
+        unsigned_appid = int(appid) & 0xFFFFFFFF
         
-        response = requests.get(search_url, headers=headers, timeout=5)
-        if response.ok:
-            data = response.json()
-            if data and len(data) > 0:
-                # Get the first match
-                game_id = data[0].get('id')
-                if game_id:
-                    # Fetch grid image
-                    grid_url = f"https://www.steamgriddb.com/api/public/grid/{game_id}"
-                    grid_response = requests.get(grid_url, headers=headers, timeout=10)
-                    if grid_response.ok:
-                        grid_data = grid_response.json()
-                        if grid_data and len(grid_data) > 0:
-                            # Get first grid image URL
-                            img_url = grid_data[0].get('url')
-                            if img_url:
-                                # Download image
-                                img_response = requests.get(img_url, headers=headers, timeout=10)
-                                if img_response.ok:
-                                    with open(icon_path, 'wb') as f:
-                                        f.write(img_response.content)
-                                    print(f"Downloaded icon for '{game_name}'")
-                                    return icon_path
-        return None
+        # Different artwork types - correct Steam naming convention
+        grid_portrait_path = os.path.join(grid_dir, f"{unsigned_appid}p.png")  # Vertical grid (600x900)
+        hero_path = os.path.join(grid_dir, f"{unsigned_appid}_hero.png")  # Hero background (1920x620)
+        logo_path = os.path.join(grid_dir, f"{unsigned_appid}_logo.png")  # Logo overlay
+        icon_path = os.path.join(grid_dir, f"{unsigned_appid}_icon.png")  # Icon
+        grid_landscape_path = os.path.join(grid_dir, f"{unsigned_appid}.png")  # Horizontal grid (920x430)
+        
+        # Check if all already exist
+        all_paths = [grid_portrait_path, grid_landscape_path, hero_path, icon_path, logo_path]
+        if all(os.path.exists(p) for p in all_paths):
+            msg = f"All artwork already exists for '{game_name}'"
+            print(msg)
+            if progress_callback:
+                progress_callback(msg)
+            return True
+        
+        # Check for API key in environment or config
+        api_key = os.environ.get('STEAMGRIDDB_API_KEY')
+        if not api_key:
+            config = load_config()
+            api_key = config.get('steamgriddb_api_key')
+        
+        if not api_key:
+            msg = f"⚠ Skipping '{game_name}' - No API key"
+            print(msg)
+            print("  Get a free API key at: https://www.steamgriddb.com/profile/preferences/api")
+            print("  Set environment variable: STEAMGRIDDB_API_KEY=your_key")
+            if progress_callback:
+                progress_callback(msg)
+            return False
+        
+        # Use SteamGridDB API with authentication
+        search_term = quote(game_name)
+        search_url = f"https://www.steamgriddb.com/api/v2/search/autocomplete/{search_term}"
+        headers = {
+            'Authorization': f'Bearer {api_key}',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        msg = f"Searching for '{game_name}'..."
+        print(msg)
+        if progress_callback:
+            progress_callback(msg)
+        
+        response = requests.get(search_url, headers=headers, timeout=10)
+        if not response.ok:
+            msg = f"✗ Search failed for '{game_name}'"
+            print(msg)
+            if progress_callback:
+                progress_callback(msg)
+            return False
+        
+        data = response.json()
+        if not (data.get('success') and data.get('data') and len(data['data']) > 0):
+            msg = f"✗ No results for '{game_name}'"
+            print(msg)
+            if progress_callback:
+                progress_callback(msg)
+            return False
+        
+        # Get the first match's game ID
+        game_id = data['data'][0].get('id')
+        if not game_id:
+            msg = f"✗ No game ID for '{game_name}'"
+            print(msg)
+            if progress_callback:
+                progress_callback(msg)
+            return False
+        
+        success_count = 0
+        
+        # Fetch different artwork types with proper filtering
+        # Note: grids endpoint returns both portrait and landscape, need to filter by dimensions
+        artwork_requests = [
+            ('grids', grid_portrait_path, 'portrait grid', 'portrait'),  # 600x900 or similar
+            ('grids', grid_landscape_path, 'landscape grid', 'landscape'),  # 920x430 or similar
+            ('heroes', hero_path, 'hero/background', None),
+            ('icons', icon_path, 'icon', None),
+            ('logos', logo_path, 'logo', None)
+        ]
+        
+        print(f"Will save artwork to:")
+        print(f"  Portrait: {grid_portrait_path}")
+        print(f"  Landscape: {grid_landscape_path}")
+        print(f"  Hero: {hero_path}")
+        print(f"  Icon: {icon_path}")
+        print(f"  Logo: {logo_path}")
+        
+        for endpoint, save_path, art_name, dimension_filter in artwork_requests:
+            if os.path.exists(save_path):
+                print(f"  {art_name} already exists")
+                success_count += 1
+                continue
+            
+            try:
+                # Different API endpoints for different art types
+                # Add dimension filter for grids
+                if dimension_filter:
+                    art_url = f"https://www.steamgriddb.com/api/v2/{endpoint}/game/{game_id}?dimensions={dimension_filter}"
+                else:
+                    art_url = f"https://www.steamgriddb.com/api/v2/{endpoint}/game/{game_id}"
+                
+                print(f"  Fetching {art_name} from {art_url}...")
+                art_response = requests.get(art_url, headers=headers, timeout=10)
+                
+                if art_response.ok:
+                    art_data = art_response.json()
+                    if art_data.get('success') and art_data.get('data') and len(art_data['data']) > 0:
+                        # Get the first image URL
+                        img_url = art_data['data'][0].get('url')
+                        if img_url:
+                            msg = f"Downloading {art_name} for '{game_name}'..."
+                            print(msg)
+                            if progress_callback:
+                                progress_callback(msg)
+                            
+                            # Don't send Authorization to CDN - use basic headers only
+                            img_headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                            img_response = requests.get(img_url, headers=img_headers, timeout=15)
+                            if img_response.ok:
+                                with open(save_path, 'wb') as f:
+                                    f.write(img_response.content)
+                                print(f"  ✓ {art_name} downloaded to {os.path.basename(save_path)}")
+                                success_count += 1
+                            else:
+                                print(f"  ✗ Failed to download {art_name}: HTTP {img_response.status_code}")
+                        else:
+                            print(f"  ✗ No URL for {art_name}")
+                    else:
+                        print(f"  ✗ No {art_name} data available")
+                else:
+                    print(f"  ✗ Failed to fetch {art_name}: HTTP {art_response.status_code}")
+            except Exception as e:
+                print(f"  ✗ Failed to download {art_name}: {e}")
+                import traceback
+                traceback.print_exc()
+        
+        if success_count > 0:
+            msg = f"✓ Downloaded {success_count}/5 artwork types for '{game_name}'"
+            print(msg)
+            if progress_callback:
+                progress_callback(msg)
+            return True
+        else:
+            msg = f"✗ Could not download any artwork for '{game_name}'"
+            print(msg)
+            if progress_callback:
+                progress_callback(msg)
+            return False
+            
     except Exception as e:
-        print(f"Failed to fetch icon for '{game_name}': {e}")
-        return None
+        msg = f"✗ Failed to fetch artwork for '{game_name}': {e}"
+        print(msg)
+        import traceback
+        traceback.print_exc()
+        if progress_callback:
+            progress_callback(msg)
+        return False
 
 def scrape_roms(roms_folder):
     # Recursively find .nsp files, avoid updates, extract display name
@@ -502,15 +703,28 @@ def add_shortcuts_to_steam_collection(appids, collection_name, steamid=None):
                 print(f"Found existing collection '{collection_name}'")
                 # Add appids to 'added' array as integers if not present
                 added = vobj.setdefault('added', [])
+                initial_count = len(added)
                 changed = False
                 for appid in appids:
-                    if int(appid) not in [int(a) for a in added]:
-                        added.append(int(appid))
+                    appid_int = int(appid)
+                    if appid_int not in [int(a) for a in added]:
+                        added.append(appid_int)
                         changed = True
-                # Remove duplicates and sort
-                vobj['added'] = sorted(set(int(a) for a in added))
+                        print(f"  Adding appid {appid_int}")
+                
                 if changed:
+                    # Remove duplicates and sort
+                    vobj['added'] = sorted(set(int(a) for a in added))
+                    # Update the value with new JSON
                     value['value'] = json.dumps(vobj, separators=(',', ':'))
+                    # Update timestamp to trigger Steam to reload
+                    value['timestamp'] = int(time.time())
+                    # Increment version number
+                    current_version = int(value.get('version', '0'))
+                    value['version'] = str(current_version + 1)
+                    print(f"  Updated collection: {len(vobj['added']) - initial_count} new games added (total: {len(vobj['added'])})")
+                else:
+                    print(f"  No new games to add (all already in collection)")
                 found = True
                 break
     if not found:
@@ -546,7 +760,7 @@ def add_shortcuts_to_steam_collection(appids, collection_name, steamid=None):
         json.dump(data, f, separators=(',', ':'))
     print(f"Updated cloud-storage-namespace-1.json with collection '{collection_name}'")
 
-def add_steam_shortcuts(emulator, platform, games, steamid=None, launch_options_template='#rom', fetch_icons=True):
+def add_steam_shortcuts(emulator, platform, games, steamid=None, launch_options_template='#rom', fetch_icons=True, progress_callback=None):
     vdf_path = find_steam_shortcuts_vdf(steamid)
     # Read existing shortcuts robustly
     shortcut_dict = {}
@@ -570,13 +784,16 @@ def add_steam_shortcuts(emulator, platform, games, steamid=None, launch_options_
     # Remove duplicates from new_appids
     new_appids = sorted(set(new_appids))
     # Second pass: write/update shortcuts
-    for game in games:
-        # Fetch icon if enabled
-        icon_path = ''
+    total_games = len(games)
+    for idx, game in enumerate(games, 1):
+        # Update progress
+        if progress_callback:
+            progress_callback(f"Processing {idx}/{total_games}: {game['display_name']}")
+        
+        # Fetch icon if enabled (save directly to Steam's grid folder)
         if fetch_icons:
-            icon = fetch_game_icon(game['display_name'], platform.lower())
-            if icon:
-                icon_path = icon.replace('/', '\\')
+            appid = calc_shortcut_appid(emulator.replace('/', '\\'), game['display_name'])
+            fetch_game_icon(game['display_name'], appid, steamid, platform.lower(), progress_callback)
         
         found = False
         for s in shortcut_list:
@@ -585,8 +802,6 @@ def add_steam_shortcuts(emulator, platform, games, steamid=None, launch_options_
                 s['Exe'] = f'"{emulator}"'.replace('/', '\\')
                 s['StartDir'] = f'"{os.path.dirname(emulator)}"'.replace('/', '\\')
                 s['LaunchOptions'] = launch_options_template.replace('#rom', f'"{game["path"]}"')
-                if icon_path:
-                    s['icon'] = icon_path
                 s['LastPlayTime'] = int(time.time())
                 s['DevkitOverrideAppID'] = 0
                 s['FlatpakAppID'] = ''
@@ -605,7 +820,7 @@ def add_steam_shortcuts(emulator, platform, games, steamid=None, launch_options_
                 'AppName': game['display_name'],
                 'Exe': f'"{emulator}"'.replace('/', '\\'),
                 'StartDir': f'"{os.path.dirname(emulator)}"'.replace('/', '\\'),
-                'icon': icon_path,
+                'icon': '',
                 'ShortcutPath': '',
                 'LaunchOptions': launch_options_template.replace('#rom', f'"{game["path"]}"'),
                 'IsHidden': 0,
@@ -622,11 +837,19 @@ def add_steam_shortcuts(emulator, platform, games, steamid=None, launch_options_
                 'appid': calc_shortcut_appid(emulator.replace('/', '\\'), game['display_name'])
             }
             shortcut_list.append(shortcut)
+    
+    if progress_callback:
+        progress_callback(f"Writing {len(shortcut_list)} shortcuts to Steam...")
+    
     print(f"Writing {len(shortcut_list)} shortcuts to {vdf_path}")
     shortcuts_dict = {'shortcuts': {str(i): s for i, s in enumerate(shortcut_list)}}
     with open(vdf_path, 'wb') as f:
         vdf.binary_dump(shortcuts_dict, f)
     print(f"Shortcuts written successfully")
+    
+    if progress_callback:
+        progress_callback(f"Adding games to '{platform}' collection...")
+    
     # Add to Steam static collection after shortcuts
     add_shortcuts_to_steam_collection(new_appids, platform, steamid)
     return updated
@@ -664,7 +887,8 @@ class SteamEmuWizard(QWizard):
         self.addPage(PlatformPage())            # Index 2
         self.addPage(RomsPage())                # Index 3
         self.addPage(LaunchOptionsPage())       # Index 4
-        self.addPage(SummaryPage(self))         # Index 5
+        self.addPage(IconOptionsPage())         # Index 5
+        self.addPage(SummaryPage(self))         # Index 6
         self.found_games = []
 
 def main():

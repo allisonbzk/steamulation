@@ -3,5 +3,6 @@
   "last_roms": "E:/games/roms/switch",
   "last_steamid": "96222932",
   "last_launch_options": "-f -g #rom",
-  "fetch_icons": true
+  "fetch_icons": true,
+  "steamgriddb_api_key": "ab8743f2e7ed2640b6c97d92dd787303"
 }

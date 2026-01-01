@@ -1,0 +1,24 @@
+# Build artifacts
+build/
+dist/
+*.spec
+
+# PyInstaller cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Icon cache
+icon_cache/
+
+# OS
+.DS_Store
+Thumbs.db

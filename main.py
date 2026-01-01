@@ -880,7 +880,7 @@ def save_config(cfg):
 class SteamEmuWizard(QWizard):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('Steam Emulator Station Wizard')
+        self.setWindowTitle('Steamulation Wizard')
         # Enable custom button but hide it by default
         self.setOption(QWizard.HaveCustomButton1, True)
         self.button(QWizard.CustomButton1).setVisible(False)

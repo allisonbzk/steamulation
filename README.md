@@ -1,4 +1,4 @@
-# Steam Emulator Station
+# Steamulation
 
 A Python tool with a PyQt5 wizard GUI to add emulator ROMs as non-Steam games in Steam, with full artwork support.
 
@@ -20,8 +20,8 @@ A Python tool with a PyQt5 wizard GUI to add emulator ROMs as non-Steam games in
 
 ### Download Binary (Recommended)
 1. Download the latest release for your platform:
-   - **Windows**: `SteamEmulatorStation.exe`
-   - **Linux/Steam Deck**: `SteamEmulatorStation`
+   - **Windows**: `Steamulation.exe`
+   - **Linux/Steam Deck**: `Steamulation`
 2. Run the executable
 3. Follow the wizard
 

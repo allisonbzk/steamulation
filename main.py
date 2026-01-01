@@ -188,6 +188,25 @@ class PlatformPage(QWizardPage):
         self.setLayout(layout)
 
 
+class LaunchOptionsPage(QWizardPage):
+    def __init__(self):
+        super().__init__()
+        self.setTitle('Launch Options')
+        layout = QVBoxLayout()
+        self.launch_options = QLineEdit()
+        layout.addWidget(QLabel('Launch Options (use #rom as placeholder for ROM path):'))
+        layout.addWidget(self.launch_options)
+        layout.addWidget(QLabel('Example: -f -g #rom'))
+        self.setLayout(layout)
+        # Autofill from config
+        config = load_config()
+        if config.get('last_launch_options'):
+            self.launch_options.setText(config['last_launch_options'])
+        else:
+            # Default value for first run
+            self.launch_options.setText('#rom')
+
+
 import re
 from PyQt5.QtWidgets import QListWidget, QListWidgetItem
 
@@ -221,6 +240,7 @@ class SummaryPage(QWizardPage):
     def save_shortcuts(self):
         emulator = self.wizard.page(1).exe_path.text()
         platform = self.wizard.page(2).platform_name.text()
+        launch_options = self.wizard.page(4).launch_options.text()  # LaunchOptionsPage is at index 4
         games = self.wizard.found_games
         steamids = self.wizard.page(0).selected_steamids()
         
@@ -242,13 +262,14 @@ class SummaryPage(QWizardPage):
         config = load_config()
         config['last_emulator'] = emulator
         config['last_roms'] = self.wizard.page(3).roms_path.text()
+        config['last_launch_options'] = launch_options
         if steamids:
             config['last_steamid'] = steamids[0]
         save_config(config)
         try:
             count = 0
             for steamid in steamids:
-                count += add_steam_shortcuts(emulator, platform.strip(), games, steamid)
+                count += add_steam_shortcuts(emulator, platform.strip(), games, steamid, launch_options)
             self.status_label.setText(f"Added/updated {count} shortcuts to Steam!")
         except Exception as e:
             import traceback
@@ -450,7 +471,7 @@ def add_shortcuts_to_steam_collection(appids, collection_name, steamid=None):
         json.dump(data, f, separators=(',', ':'))
     print(f"Updated cloud-storage-namespace-1.json with collection '{collection_name}'")
 
-def add_steam_shortcuts(emulator, platform, games, steamid=None):
+def add_steam_shortcuts(emulator, platform, games, steamid=None, launch_options_template='#rom'):
     vdf_path = find_steam_shortcuts_vdf(steamid)
     # Read existing shortcuts robustly
     shortcut_dict = {}
@@ -481,7 +502,7 @@ def add_steam_shortcuts(emulator, platform, games, steamid=None):
                 s['AppName'] = game['display_name']
                 s['Exe'] = f'"{emulator}"'.replace('/', '\\')
                 s['StartDir'] = f'"{os.path.dirname(emulator)}"'.replace('/', '\\')
-                s['LaunchOptions'] = f'-f -g "{game["path"]}"'
+                s['LaunchOptions'] = launch_options_template.replace('#rom', f'"{game["path"]}"')
                 s['LastPlayTime'] = int(time.time())
                 s['DevkitOverrideAppID'] = 0
                 s['FlatpakAppID'] = ''
@@ -502,7 +523,7 @@ def add_steam_shortcuts(emulator, platform, games, steamid=None):
                 'StartDir': f'"{os.path.dirname(emulator)}"'.replace('/', '\\'),
                 'icon': '',
                 'ShortcutPath': '',
-                'LaunchOptions': f'-f -g "{game["path"]}"',
+                'LaunchOptions': launch_options_template.replace('#rom', f'"{game["path"]}"'),
                 'IsHidden': 0,
                 'AllowDesktopConfig': 1,
                 'AllowOverlay': 1,
@@ -551,11 +572,12 @@ class SteamEmuWizard(QWizard):
     def __init__(self):
         super().__init__()
         self.setWindowTitle('Steam Emulator Station Wizard')
-        self.addPage(SteamUserPage())
-        self.addPage(EmulatorPage())
-        self.addPage(PlatformPage())
-        self.addPage(RomsPage())
-        self.addPage(SummaryPage(self))
+        self.addPage(SteamUserPage())           # Index 0
+        self.addPage(EmulatorPage())            # Index 1
+        self.addPage(PlatformPage())            # Index 2
+        self.addPage(RomsPage())                # Index 3
+        self.addPage(LaunchOptionsPage())       # Index 4
+        self.addPage(SummaryPage(self))         # Index 5
         self.found_games = []
 
 def main():
